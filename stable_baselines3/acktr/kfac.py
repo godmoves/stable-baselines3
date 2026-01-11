@@ -47,7 +47,7 @@ class KFACOptimizer(optim.Optimizer):
         defaults = dict(lr=lr, momentum=momentum, damping=damping, weight_decay=weight_decay)
         super().__init__(model.parameters(), defaults)
 
-        self.known_modules: dict[nn.Module, Any] = {}
+        self.known_modules: dict[nn.Module, str] = {}
         self.modules: list[nn.Module] = []
         self.model = model
         self.stat_decay = stat_decay
@@ -55,6 +55,8 @@ class KFACOptimizer(optim.Optimizer):
         self.update_freq = update_freq
 
         self.steps = 0
+        # Cache for identity matrices to avoid recomputing them
+        self.identity_cache: dict[int, torch.Tensor] = {}
         self._prepare_model()
 
     def _prepare_model(self) -> None:
@@ -154,6 +156,20 @@ class KFACOptimizer(optim.Optimizer):
                 else:
                     self.m_gg[module] = self.stat_decay * self.m_gg[module] + (1 - self.stat_decay) * gg_t
 
+    def _get_identity(self, size: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        """
+        Get cached identity matrix or create a new one.
+
+        :param size: Size of the identity matrix
+        :param device: Device to create the matrix on
+        :param dtype: Data type of the matrix
+        :return: Identity matrix
+        """
+        key = (size, device, dtype)
+        if key not in self.identity_cache:
+            self.identity_cache[key] = torch.eye(size, device=device, dtype=dtype)
+        return self.identity_cache[key]
+
     @torch.no_grad()
     def step(self, closure: Any = None) -> torch.Tensor | None:  # noqa: C901
         """
@@ -223,9 +239,9 @@ class KFACOptimizer(optim.Optimizer):
                     m_gg = self.m_gg[module]
                     m_aa = self.m_aa[module]
 
-                    # Add damping for numerical stability
-                    m_gg_damp = m_gg + self.damping * torch.eye(m_gg.size(0), device=m_gg.device, dtype=m_gg.dtype)
-                    m_aa_damp = m_aa + self.damping * torch.eye(m_aa.size(0), device=m_aa.device, dtype=m_aa.dtype)
+                    # Add damping for numerical stability using cached identity matrices
+                    m_gg_damp = m_gg + self.damping * self._get_identity(m_gg.size(0), m_gg.device, m_gg.dtype)
+                    m_aa_damp = m_aa + self.damping * self._get_identity(m_aa.size(0), m_aa.device, m_aa.dtype)
 
                     # Compute natural gradient using Kronecker-factored preconditioner
                     # Natural gradient = inv(G) @ grad @ inv(A)
@@ -278,8 +294,9 @@ class KFACOptimizer(optim.Optimizer):
                             else:
                                 param.data.add_(natural_grad.view_as(v), alpha=-group["lr"])
 
-                    except RuntimeError:
-                        # Fallback to standard momentum if inversion fails
+                    except (RuntimeError, torch.linalg.LinAlgError):
+                        # Fallback to standard momentum if matrix inversion fails
+                        # This can happen if the Fisher matrix is singular or ill-conditioned
                         param.data.add_(v, alpha=-group["lr"])
                 else:
                     # Fallback to standard momentum update if Fisher not computed yet
