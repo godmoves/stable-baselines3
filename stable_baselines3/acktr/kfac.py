@@ -56,7 +56,8 @@ class KFACOptimizer(optim.Optimizer):
 
         self.steps = 0
         # Cache for identity matrices to avoid recomputing them
-        self.identity_cache: dict[int, torch.Tensor] = {}
+        # Key is (size, device_str, dtype_str) for hashability
+        self.identity_cache: dict[tuple[int, str, str], torch.Tensor] = {}
         self._prepare_model()
 
     def _prepare_model(self) -> None:
@@ -165,7 +166,8 @@ class KFACOptimizer(optim.Optimizer):
         :param dtype: Data type of the matrix
         :return: Identity matrix
         """
-        key = (size, device, dtype)
+        # Use string representations for hashability
+        key = (size, str(device), str(dtype))
         if key not in self.identity_cache:
             self.identity_cache[key] = torch.eye(size, device=device, dtype=dtype)
         return self.identity_cache[key]

@@ -143,10 +143,10 @@ class ACKTR(OnPolicyAlgorithm):
         super()._setup_model()
 
         # Replace the optimizer with K-FAC optimizer
-        # Get current learning rate (use progress_remaining = 1.0 for initial value)
+        # Get current learning rate (for scheduled learning rates, get initial value at progress 1.0)
         lr = self.learning_rate
         if callable(lr):
-            # For scheduled learning rates, start with the initial value (progress_remaining=1.0)
+            # Start with the initial learning rate value
             lr = lr(1.0)
 
         self.policy.optimizer = KFACOptimizer(
