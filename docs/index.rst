@@ -69,6 +69,7 @@ Main Features
 
   modules/base
   modules/a2c
+  modules/acktr
   modules/ddpg
   modules/dqn
   modules/her
