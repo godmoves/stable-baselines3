@@ -32,13 +32,16 @@ algorithms = {
     "ACKTR": {
         "class": ACKTR,
         "kwargs": {
-            "learning_rate": 0.25,
-            "n_steps": 20,
+            "learning_rate": 0.01,  # Reduced from 0.25 - too high for LunarLander
+            "n_steps": 128,  # Increased from 20 - larger batch size for stability
             "gamma": 0.99,
-            "gae_lambda": 1.0,
+            "gae_lambda": 0.95,  # Changed from 1.0 - better bias-variance tradeoff
             "ent_coef": 0.01,
             "vf_coef": 0.5,
             "max_grad_norm": 0.5,
+            "kfac_update_freq": 10,  # Update K-FAC less frequently for stability
+            "kfac_damping": 0.1,  # Increased damping for stability
+            "normalize_advantage": True,  # Enable advantage normalization
         },
     },
     "PPO": {
