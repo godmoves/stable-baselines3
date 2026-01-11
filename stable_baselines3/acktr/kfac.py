@@ -101,7 +101,6 @@ class KFACOptimizer(optim.Optimizer):
                 # This is a simplification - full K-FAC would extract patches
                 batch_size = aa.size(0)
                 channels = aa.size(1)
-                spatial_size = aa.size(2) * aa.size(3)
 
                 # Reshape and compute mean over spatial dimensions
                 aa = aa.view(batch_size, channels, -1).mean(2)
@@ -111,7 +110,9 @@ class KFACOptimizer(optim.Optimizer):
                     aa = torch.cat([aa, aa.new_ones(batch_size, 1)], 1)
                 self.activations[module] = aa
 
-    def _save_grad_output(self, module: nn.Module, grad_input: tuple[torch.Tensor, ...], grad_output: tuple[torch.Tensor, ...]) -> None:
+    def _save_grad_output(
+        self, module: nn.Module, grad_input: tuple[torch.Tensor, ...], grad_output: tuple[torch.Tensor, ...]
+    ) -> None:
         """Hook to save layer gradient outputs for computing Fisher information."""
         if self.steps % self.update_freq == 0:
             classname = self.known_modules[module]
@@ -154,7 +155,7 @@ class KFACOptimizer(optim.Optimizer):
                     self.m_gg[module] = self.stat_decay * self.m_gg[module] + (1 - self.stat_decay) * gg_t
 
     @torch.no_grad()
-    def step(self, closure: Any = None) -> torch.Tensor | None:
+    def step(self, closure: Any = None) -> torch.Tensor | None:  # noqa: C901
         """
         Perform a single optimization step using natural gradient.
 
@@ -236,11 +237,16 @@ class KFACOptimizer(optim.Optimizer):
                             g_reshape = v.data
                             if module.bias is not None and g_reshape.size(1) == m_aa_damp.size(0) - 1:
                                 # Pad for bias
-                                bias_grad = module.bias.grad.data if module.bias.grad is not None else torch.zeros_like(module.bias)
+                                if module.bias.grad is not None:
+                                    bias_grad = module.bias.grad.data
+                                else:
+                                    bias_grad = torch.zeros_like(module.bias)
                                 g_reshape = torch.cat([g_reshape, bias_grad.unsqueeze(1)], 1)
 
                             # Apply Kronecker-factored preconditioner
-                            natural_grad = torch.linalg.multi_dot([torch.linalg.inv(m_gg_damp), g_reshape, torch.linalg.inv(m_aa_damp)])
+                            inv_gg = torch.linalg.inv(m_gg_damp)
+                            inv_aa = torch.linalg.inv(m_aa_damp)
+                            natural_grad = torch.linalg.multi_dot([inv_gg, g_reshape, inv_aa])
 
                             # Extract weight update
                             if module.bias is not None and natural_grad.size(1) > v.size(1):
@@ -255,10 +261,15 @@ class KFACOptimizer(optim.Optimizer):
                             # For Conv2d: simplified version treating as matrix
                             g_reshape = v.data.view(v.size(0), -1)
                             if module.bias is not None and g_reshape.size(1) == m_aa_damp.size(0) - 1:
-                                bias_grad = module.bias.grad.data if module.bias.grad is not None else torch.zeros_like(module.bias)
+                                if module.bias.grad is not None:
+                                    bias_grad = module.bias.grad.data
+                                else:
+                                    bias_grad = torch.zeros_like(module.bias)
                                 g_reshape = torch.cat([g_reshape, bias_grad.unsqueeze(1)], 1)
 
-                            natural_grad = torch.linalg.multi_dot([torch.linalg.inv(m_gg_damp), g_reshape, torch.linalg.inv(m_aa_damp)])
+                            inv_gg = torch.linalg.inv(m_gg_damp)
+                            inv_aa = torch.linalg.inv(m_aa_damp)
+                            natural_grad = torch.linalg.multi_dot([inv_gg, g_reshape, inv_aa])
 
                             if module.bias is not None and natural_grad.size(1) > v.view(v.size(0), -1).size(1):
                                 param.data.add_(natural_grad[:, :-1].view_as(v), alpha=-group["lr"])

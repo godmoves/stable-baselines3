@@ -2,10 +2,8 @@
 Basic test for ACKTR implementation
 """
 import gymnasium as gym
-import pytest
 
 from stable_baselines3 import ACKTR
-from stable_baselines3.common.evaluation import evaluate_policy
 
 
 def test_acktr_cartpole():
