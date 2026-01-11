@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 import torch as th
 
-from stable_baselines3 import A2C, DDPG, DQN, PPO, SAC, TD3
+from stable_baselines3 import A2C, ACKTR, DDPG, DQN, PPO, SAC, TD3
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.noise import NormalActionNoise, OrnsteinUhlenbeckActionNoise
 
@@ -37,10 +37,17 @@ def test_a2c(env_id):
     model.learn(total_timesteps=64)
 
 
-@pytest.mark.parametrize("model_class", [A2C, PPO])
+@pytest.mark.parametrize("env_id", ["CartPole-v1", "Pendulum-v1"])
+def test_acktr(env_id):
+    model = ACKTR("MlpPolicy", env_id, seed=0, policy_kwargs=dict(net_arch=[16]), verbose=1, n_steps=32)
+    model.learn(total_timesteps=64)
+
+
+@pytest.mark.parametrize("model_class", [A2C, ACKTR, PPO])
 @pytest.mark.parametrize("normalize_advantage", [False, True])
 def test_advantage_normalization(model_class, normalize_advantage):
-    model = model_class("MlpPolicy", "CartPole-v1", n_steps=64, normalize_advantage=normalize_advantage)
+    n_steps = 32 if model_class == ACKTR else 64
+    model = model_class("MlpPolicy", "CartPole-v1", n_steps=n_steps, normalize_advantage=normalize_advantage)
     model.learn(64)
 
 
