@@ -15,7 +15,7 @@ from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.evaluation import evaluate_policy
 
 # Environment settings
-ENV_ID = "LunarLander-v2"
+ENV_ID = "LunarLander-v3"
 N_ENVS = 4
 TOTAL_TIMESTEPS = 200_000
 EVAL_FREQ = 5_000
