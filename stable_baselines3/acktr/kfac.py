@@ -10,7 +10,8 @@ This implementation is adapted from:
 - https://github.com/ikostrikov/pytorch-a2c-ppo-acktr-gail (PyTorch version)
 """
 
-from typing import Any, Optional
+import math
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -38,16 +39,16 @@ class KFACOptimizer(optim.Optimizer):
     def __init__(
         self,
         model: nn.Module,
-        lr: float = 0.25,
+        lr: float = 0.01,
         momentum: float = 0.9,
-        stat_decay: float = 0.99,
-        damping: float = 1e-3,
-        kl_clip: float = 0.001,
+        stat_decay: float = 0.95,
+        damping: float = 0.01,
+        kl_clip: float = 0.01,
         weight_decay: float = 0,
-        update_freq: int = 1,
-        cold_start_steps: int = 10,
+        update_freq: int = 2,
+        cold_start_steps: int = 100,
         cold_start_lr: float | None = None,
-        max_grad_norm: float | None = None,
+        max_grad_norm: float | None = 0.5,
     ):
         defaults = dict(lr=lr, momentum=momentum, weight_decay=weight_decay)
         super().__init__(model.parameters(), defaults)
@@ -60,6 +61,10 @@ class KFACOptimizer(optim.Optimizer):
         self.cold_start_steps = cold_start_steps
         self.cold_start_lr = cold_start_lr if cold_start_lr is not None else lr
         self.max_grad_norm = max_grad_norm
+
+        # When True, backward hooks will save layer-wise gradients for Fisher statistics.
+        # This flag is meant to be toggled temporarily around a dedicated Fisher-loss backward.
+        self.acc_stats: bool = False
 
         self.steps = 0
         self.known_modules: dict[nn.Module, str] = {}
@@ -116,7 +121,8 @@ class KFACOptimizer(optim.Optimizer):
         self, module: nn.Module, grad_input: tuple[torch.Tensor, ...], grad_output: tuple[torch.Tensor, ...]
     ) -> None:
         """Hook to save layer gradient outputs for computing Fisher information."""
-        if self.steps % self.update_freq == 0:
+        # Only capture gradients during the dedicated Fisher backward.
+        if self.acc_stats and self.steps % self.update_freq == 0:
             classname = self.known_modules[module]
             g = grad_output[0].detach()
             if classname == "Linear":
@@ -180,6 +186,10 @@ class KFACOptimizer(optim.Optimizer):
                     self.m_gg[module] = cov_g
                 else:
                     self.m_gg[module].mul_(self.stat_decay).add_(cov_g, alpha=1 - self.stat_decay)
+
+                # Clear per-step buffers once consumed to avoid reusing stale tensors
+                self.activations[module] = None
+                self.gradients[module] = None
 
     def _get_identity(self, size: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         """
@@ -260,10 +270,6 @@ class KFACOptimizer(optim.Optimizer):
 
     def _kfac_step(self) -> None:
         """Perform a K-FAC natural gradient step."""
-        # Update Fisher matrices from stored activations/gradients
-        if (self.steps - self.cold_start_steps) % self.update_freq == 0:
-            self._update_fisher_stats()
-
         kfac_update = {}
         vg_sum = 0.0
         for group in self.param_groups:
@@ -336,7 +342,8 @@ class KFACOptimizer(optim.Optimizer):
                         weight_update = v
                         bias_update = None
                 elif self.known_modules[module] == "Conv2d":
-                    if module.bias is not None and v.size(1) == param.data.numel() + 1:
+                    per_output_numel = param.data[0].numel()
+                    if module.bias is not None and v.size(1) == per_output_numel + 1:
                         weight_update = v[:, :-1].view_as(param.data)
                         bias_update = v[:, -1]
                     else:
@@ -353,10 +360,11 @@ class KFACOptimizer(optim.Optimizer):
                     "effective_lr": effective_lr,
                     "weight_decay": weight_decay,
                 }
-                vg_sum += (v * g * lr * lr).sum().item()
+                vg_sum += (v * g).sum().item() * lr * lr
 
         # Compute scaling factor for KL clipping, i.e., eta_max is fixed as 1.0
-        scaling = torch.min(torch.tensor(1.0), torch.sqrt(self.kl_clip / (vg_sum + 1e-10)))
+        assert vg_sum >= 0.0, "vg_sum should be non-negative."
+        scaling = min(1.0, math.sqrt(self.kl_clip / vg_sum))
         for param, update_info in kfac_update.items():
             module = update_info["module"]
             weight_update = update_info["weight_update"]
@@ -389,6 +397,9 @@ class KFACOptimizer(optim.Optimizer):
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
+
+        if self.steps % self.update_freq == 0:
+            self._update_fisher_stats()
 
         if self.steps < self.cold_start_steps:
             # Use standard SGD momentum during cold start phase

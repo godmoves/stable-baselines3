@@ -77,6 +77,7 @@ class ACKTR(OnPolicyAlgorithm):
         gae_lambda: float = 1.0,
         ent_coef: float = 0.01,
         vf_coef: float = 0.5,
+        vf_fisher_coef: float = 1.0,
         max_grad_norm: float = 0.5,
         kfac_update_freq: int = 1,
         kfac_momentum: float = 0.9,
@@ -131,6 +132,7 @@ class ACKTR(OnPolicyAlgorithm):
         self.kfac_damping = kfac_damping
         self.kfac_kl_clip = kfac_kl_clip
         self.kfac_stat_decay = kfac_stat_decay
+        self.vf_fisher_coef = vf_fisher_coef
 
         # K-FAC optimizer will be set up in _setup_model after policy is created
         if _init_setup_model:
@@ -156,8 +158,10 @@ class ACKTR(OnPolicyAlgorithm):
             stat_decay=self.kfac_stat_decay,
             kl_clip=self.kfac_kl_clip,
             damping=self.kfac_damping,
-            weight_decay=0,
             update_freq=self.kfac_update_freq,
+            weight_decay=0,
+            cold_start_steps=10,
+            max_grad_norm=self.max_grad_norm,
         )
 
     def train(self) -> None:
@@ -201,12 +205,29 @@ class ACKTR(OnPolicyAlgorithm):
 
             loss = policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss
 
+            # Fisher loss for K-FAC
+            policy_fisher_loss = log_prob.mean()
+            values_sample = (values + th.randn_like(values)).detach()
+            value_fisher_loss = -((values - values_sample) ** 2).mean()
+            fisher_loss = policy_fisher_loss + self.vf_fisher_coef * value_fisher_loss
+
             # Optimization step
             self.policy.optimizer.zero_grad()
-            loss.backward()
+            loss.backward(retain_graph=True)
 
-            # Clip grad norm
-            th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+            # Use autograd.grad to run a backward pass that triggers hooks for Fisher
+            # statistics without modifying parameter .grad (used for the actual update).
+            self.policy.optimizer.acc_stats = True
+            th.autograd.grad(
+                fisher_loss,
+                list(self.policy.parameters()),
+                retain_graph=False,
+                create_graph=False,
+                allow_unused=True,
+            )
+            self.policy.optimizer.acc_stats = False
+
+            # Step the K-FAC optimizer
             self.policy.optimizer.step()
 
         explained_var = explained_variance(self.rollout_buffer.values.flatten(), self.rollout_buffer.returns.flatten())
