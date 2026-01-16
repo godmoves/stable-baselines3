@@ -64,6 +64,7 @@ class KFACOptimizer(optim.Optimizer):
         self.steps = 0
         self.known_modules: dict[nn.Module, str] = {}
         self.modules: list[nn.Module] = []
+        self.param_to_module: dict[torch.Tensor, nn.Module] = {}
 
         # Cache for identity matrices to avoid recomputing them
         # Key is (size, device_str, dtype_str) for hashability
@@ -87,6 +88,9 @@ class KFACOptimizer(optim.Optimizer):
             if classname in ["Linear", "Conv2d"]:
                 self.modules.append(module)
                 self.known_modules[module] = classname
+                self.param_to_module[module.weight] = module
+                if module.bias is not None:
+                    self.param_to_module[module.bias] = module
                 module.register_forward_pre_hook(self._save_input)
                 module.register_full_backward_hook(self._save_grad_output)
 
@@ -100,13 +104,13 @@ class KFACOptimizer(optim.Optimizer):
         """Hook to save layer inputs for computing Fisher information."""
         if torch.is_grad_enabled() and self.steps % self.update_freq == 0:
             classname = self.known_modules[module]
-            aa = input[0].detach()
+            a = input[0].detach()
             if classname == "Linear":
-                assert aa.dim() == 2, f"Expected 2D tensor for Linear, got {aa.dim()}D"
+                assert a.dim() == 2, f"Expected 2D tensor for Linear, got {a.dim()}D"
             elif classname == "Conv2d":
-                assert aa.dim() == 4, f"Expected 4D tensor for Conv2d, got {aa.dim()}D"
+                assert a.dim() == 4, f"Expected 4D tensor for Conv2d, got {a.dim()}D"
             # Store activations directly; further processing done in _update_fisher_stats
-            self.activations[module] = aa
+            self.activations[module] = a
 
     def _save_grad_output(
         self, module: nn.Module, grad_input: tuple[torch.Tensor, ...], grad_output: tuple[torch.Tensor, ...]
@@ -114,13 +118,13 @@ class KFACOptimizer(optim.Optimizer):
         """Hook to save layer gradient outputs for computing Fisher information."""
         if self.steps % self.update_freq == 0:
             classname = self.known_modules[module]
-            gg = grad_output[0].detach()
+            g = grad_output[0].detach()
             if classname == "Linear":
-                assert gg.dim() == 2, f"Expected 2D tensor for Linear, got {gg.dim()}D"
+                assert g.dim() == 2, f"Expected 2D tensor for Linear, got {g.dim()}D"
             elif classname == "Conv2d":
-                assert gg.dim() == 4, f"Expected 4D tensor for Conv2d, got {gg.dim()}D"
+                assert g.dim() == 4, f"Expected 4D tensor for Conv2d, got {g.dim()}D"
             # Store gradients directly; further processing done in _update_fisher_stats
-            self.gradients[module] = gg
+            self.gradients[module] = g
 
     def _update_fisher_stats(self) -> None:
         """
@@ -131,39 +135,40 @@ class KFACOptimizer(optim.Optimizer):
             if self.activations[module] is not None and self.gradients[module] is not None:
                 classname = self.known_modules[module]
 
-                aa = self.activations[module]
-                gg = self.gradients[module]
+                a = self.activations[module]
+                g = self.gradients[module]
 
                 # Compute Cov_A and Cov_G based on layer type
                 if classname == "Linear":
-                    # aa: (batch_size, in_features)
-                    # Add bias term
+                    # a: (batch_size, in_features)
+                    B = a.size(0)  # batch_size
                     if module.bias is not None:
-                        aa = torch.cat([aa, aa.new_ones(aa.size(0), 1)], 1)
-                    cov_a = aa.t() @ aa / aa.size(0)
-                    # gg: (batch_size, out_features)
-                    cov_g = gg.t() @ gg / gg.size(0)
+                        a = torch.cat([a, a.new_ones(a.size(0), 1)], 1)
+                    cov_a = a.t() @ a / B
+                    # g: (batch_size, out_features)
+                    g_scaled = g * B  # Scale gradient by batch size
+                    cov_g = g_scaled.t() @ g_scaled / B
                 elif classname == "Conv2d":
-                    # aa: (batch_size, in_channels, height, width)
-                    # aa_unfold: (batch_size, in_channels * kernel_height * kernel_width, num_patches)
-                    aa_unfold = F.unfold(aa, module.kernel_size, dilation=module.dilation, padding=module.padding, stride=module.stride)
-                    B = aa_unfold.size(0)  # batch_size
-                    T = aa_unfold.size(2)  # num_patches = out_height * out_width
+                    # a: (batch_size, in_channels, height, width)
+                    # a_unfold: (batch_size, in_channels * kernel_height * kernel_width, num_patches)
+                    a_unfold = F.unfold(a, module.kernel_size, dilation=module.dilation, padding=module.padding, stride=module.stride)
+                    B = a_unfold.size(0)  # batch_size
+                    T = a_unfold.size(2)  # num_patches = out_height * out_width
                     # Reshape to (batch_size * num_patches, in_channels * kernel_height * kernel_width)
-                    aa_unfold = aa_unfold.permute(0, 2, 1).contiguous().view(-1, aa_unfold.size(1))
-                    aa_unfold = aa_unfold / T
-                    # Add bias term
+                    a_unfold = a_unfold.permute(0, 2, 1).contiguous().view(-1, a_unfold.size(1))
+                    a_unfold = a_unfold / T
                     if module.bias is not None:
-                        aa_unfold = torch.cat(
-                            [aa_unfold, aa_unfold.new_ones(aa_unfold.size(0), 1) / T],
+                        a_unfold = torch.cat(
+                            [a_unfold, a_unfold.new_ones(a_unfold.size(0), 1) / T],
                             dim=1,
                         )
-                    cov_a = aa_unfold.t() @ aa_unfold / B
-                    # gg: (batch_size, out_channels, out_height, out_width)
+                    cov_a = a_unfold.t() @ a_unfold / B
+                    # g: (batch_size, out_channels, out_height, out_width)
                     # Reshape to (batch_size * out_height * out_width, out_channels)
-                    gg_2d = gg.permute(0, 2, 3, 1).contiguous().view(-1, gg.size(1))
-                    gg_2d = gg_2d * T * B
-                    cov_g = gg_2d.t() @ gg_2d / gg_2d.size(0)
+                    g_2d = g.permute(0, 2, 3, 1).contiguous().view(-1, g.size(1))
+                    g_2d = g_2d * T
+                    g_2d = g_2d * B
+                    cov_g = g_2d.t() @ g_2d / (B * T)
 
                 # Update moving averages
                 if self.m_aa[module] is None:
@@ -191,28 +196,28 @@ class KFACOptimizer(optim.Optimizer):
             self.identity_cache[key] = torch.eye(size, device=device, dtype=dtype)
         return self.identity_cache[key]
 
-    def _clip_gradients(self) -> None:
-        """Clip gradients to the maximum norm if specified."""
-        total_norm = 0.0
+    def _get_momentum_buffer(self, param: torch.Tensor) -> torch.Tensor:
+        """Get (and lazily initialize) the momentum buffer for a parameter."""
+        param_state = self.state[param]
+        if len(param_state) == 0:
+            param_state["momentum_buffer"] = torch.zeros_like(param.data)
+        return param_state["momentum_buffer"]
+
+    def _clear_momentum_buffers(self) -> None:
+        """Clear all momentum buffers."""
         for group in self.param_groups:
             for param in group["params"]:
-                if param.grad is not None:
-                    param_norm = param.grad.data.norm(2)
-                    total_norm += param_norm.item() ** 2
-        total_norm = total_norm ** 0.5
-        clip_coef = self.max_grad_norm / (total_norm + 1e-6)
-        if clip_coef < 1:
-            for group in self.param_groups:
-                for param in group["params"]:
-                    if param.grad is not None:
-                        param.grad.data.mul_(clip_coef)
+                param_state = self.state[param]
+                if "momentum_buffer" in param_state:
+                    param_state["momentum_buffer"].zero_()
 
     def _sgd_momentum_step(self) -> None:
         """Perform a standard SGD momentum step."""
         # Clip gradients before the update if specified
         if self.max_grad_norm is not None:
-            self._clip_gradients()
-
+            all_params = [p for group in self.param_groups for p in group["params"]]
+            torch.nn.utils.clip_grad_norm_(all_params, self.max_grad_norm)
+            
         # Standard SGD momentum update
         for group in self.param_groups:
             for param in group["params"]:
@@ -220,68 +225,38 @@ class KFACOptimizer(optim.Optimizer):
                     continue
 
                 grad = param.grad.data
-                state = self.state[param]
-                if len(state) == 0:
-                    state["momentum_buffer"] = torch.zeros_like(param.data)
-
-                v = state["momentum_buffer"]
+                v = self._get_momentum_buffer(param)
+                # Standard / Polyak momentum update, v = momentum * v + grad
                 v.mul_(group["momentum"]).add_(grad)
 
-                if group["weight_decay"] != 0:
-                    param.data.add_(param.data, alpha=-group["weight_decay"] * group["lr"])
+                # if group["weight_decay"] != 0:
+                #     # Use decoupled weight decay as in AdamW
+                #     param.data.add_(param.data, alpha=-group["weight_decay"] * group["lr"])
                 param.data.add_(v, alpha=-group["lr"])
 
     def _apply_fisher_preconditioned_grad(
         self,
-        module: nn.Module,
         grad: torch.Tensor,
         m_aa: torch.Tensor,
         m_gg: torch.Tensor,
-        state: dict,
-        momentum: float,
+        lam: float,
+        eps: float = 1e-6,
     ) -> torch.Tensor:
         """Apply K-FAC preconditioning to the gradient."""
-        damping = self.damping
-        g_reshape = grad.data
-        
-        if self.known_modules[module] == "Linear":
-            # For Linear: weight is (out_features, in_features)
-            if module.bias is not None and g_reshape.size(1) == m_aa.size(0) - 1:
-                # Pad for bias
-                if module.bias.grad is not None:
-                    bias_grad = module.bias.grad.data
-                else:
-                    bias_grad = torch.zeros_like(module.bias)
-                g_reshape = torch.cat([g_reshape, bias_grad.unsqueeze(1)], 1)
-        elif self.known_modules[module] == "Conv2d":
-            # For Conv2d: weight is (out_channels, in_channels, kH, kW)
-            g_reshape = g_reshape.view(g_reshape.size(0), -1)
-            if module.bias is not None and g_reshape.size(1) == m_aa.size(0) - 1:
-                if module.bias.grad is not None:
-                    bias_grad = module.bias.grad.data
-                else:
-                    bias_grad = torch.zeros_like(module.bias)
-                g_reshape = torch.cat([g_reshape, bias_grad.unsqueeze(1)], 1)
-
         # SVD of Fisher matrices
-        d_a, Q_a = torch.linalg.eigh(m_aa + damping * self._get_identity(m_aa.size(0), m_aa.device, m_aa.dtype))
-        d_g, Q_g = torch.linalg.eigh(m_gg + damping * self._get_identity(m_gg.size(0), m_gg.device, m_gg.dtype))
-        
-        # Invert eigenvalues with damping
-        d_a_inv = 1.0 / d_a
-        d_g_inv = 1.0 / d_g
-        
+        d_a, Q_a = torch.linalg.eigh(m_aa)
+        d_g, Q_g = torch.linalg.eigh(m_gg)
+
+        # Clip eigenvalues to avoid numerical issues
+        d_a.clamp_(min=eps)
+        d_g.clamp_(min=eps)
+
         # Compute natural gradient
-        v1 = Q_g.t() @ g_reshape @ Q_a
-        v2 = v1 / (d_g_inv.unsqueeze(1) @ d_a_inv.unsqueeze(0) + damping)
+        v1 = Q_g.t() @ grad @ Q_a
+        v2 = v1 / (d_g.unsqueeze(1) @ d_a.unsqueeze(0) + lam)
         v3 = Q_g @ v2 @ Q_a.t()
 
-        # Apply momentum
-        v = state["momentum_buffer"]
-        v.mul_(momentum).add_(v3)
-
-        # Apply natural gradient
-        if self.known_modules[module] == "Linear":
+        return v3
 
     def _kfac_step(self) -> None:
         """Perform a K-FAC natural gradient step."""
@@ -289,110 +264,117 @@ class KFACOptimizer(optim.Optimizer):
         if (self.steps - self.cold_start_steps) % self.update_freq == 0:
             self._update_fisher_stats()
 
+        kfac_update = {}
+        vg_sum = 0.0
         for group in self.param_groups:
             for param in group["params"]:
                 if param.grad is None:
                     continue
 
                 grad = param.grad.data
+                lr = group["lr"]
+                momentum = group["momentum"]
+                weight_decay = group["weight_decay"]
+                # Effective learning rate considering momentum
+                effective_lr = lr * (1 - momentum)
 
                 # Find the module this parameter belongs to
-                module = None
-                is_bias = False
-                for m in self.modules:
-                    if param is m.weight:
-                        module = m
-                        is_bias = False
-                        break
-                    elif hasattr(m, "bias") and m.bias is not None and param is m.bias:
-                        module = m
-                        is_bias = True
-                        break
-
-                # Bias updates are handled together with weights in K-FAC
-                if is_bias:
+                module = self.param_to_module.get(param, None)
+                if module and getattr(module, "bias", None) is param:
+                    # Bias updates are handled together with weights in K-FAC
                     continue
 
                 # Standard grad dient descent for parameters not in known modules
                 if module is None:
-                    state = self.state[param]
-                    if len(state) == 0:
-                        state["momentum_buffer"] = torch.zeros_like(param.data)
+                    v = self._get_momentum_buffer(param)
+                    v.mul_(momentum).add_(grad)
 
-                    v = state["momentum_buffer"]
-                    v.mul_(group["momentum"]).add_(grad)
-
-                    if group["weight_decay"] != 0:
-                        param.data.add_(param.data, alpha=-group["weight_decay"] * group["lr"])
-                    param.data.add_(v, alpha=-group["lr"])
+                    # if weight_decay != 0:
+                    #     param.data.add_(param.data, alpha=-weight_decay * lr)
+                    param.data.add_(v, alpha=-effective_lr)
                     continue
 
                 # Apply natural gradient update for weights
-                state = self.state[param]
-                if len(state) == 0:
-                    state["momentum_buffer"] = torch.zeros_like(param.data)
-
-                # v = state["momentum_buffer"]
-                # v.mul_(group["momentum"]).add_(grad)
-
-                # Compute natural gradient
                 assert (self.m_aa[module] is not None and self.m_gg[module] is not None), "Fisher information matrices have not been initialized."
-                m_gg = self.m_gg[module]
+                g = grad.data
                 m_aa = self.m_aa[module]
-
-                # Add damping for numerical stability using cached identity matrices
-                # m_gg_damp = m_gg + self.damping * self._get_identity(m_gg.size(0), m_gg.device, m_gg.dtype)
-                # m_aa_damp = m_aa + self.damping * self._get_identity(m_aa.size(0), m_aa.device, m_aa.dtype)
-
-                # Compute natural gradient using Kronecker-factored preconditioner
-                # Natural gradient = inv(G) @ grad @ inv(A)
-                # where G is gradient covariance and A is activation covariance
+                m_gg = self.m_gg[module]
+        
+                # Handle bias by augmenting gradient
                 if self.known_modules[module] == "Linear":
                     # For Linear: weight is (out_features, in_features)
-                    # With bias handling in activation stats
-                    g_reshape = v.data
-                    if module.bias is not None and g_reshape.size(1) == m_aa_damp.size(0) - 1:
+                    if module.bias is not None and g.size(1) == m_aa.size(0) - 1:
                         # Pad for bias
                         if module.bias.grad is not None:
                             bias_grad = module.bias.grad.data
                         else:
-                            bias_grad = torch.zeros_like(module.bias)
-                        g_reshape = torch.cat([g_reshape, bias_grad.unsqueeze(1)], 1)
-
-                    # Apply Kronecker-factored preconditioner
-                    inv_gg = torch.linalg.inv(m_gg_damp)
-                    inv_aa = torch.linalg.inv(m_aa_damp)
-                    natural_grad = torch.linalg.multi_dot([inv_gg, g_reshape, inv_aa])
-
-                    # Extract weight update
-                    if module.bias is not None and natural_grad.size(1) > v.size(1):
-                        param.data.add_(natural_grad[:, :-1], alpha=-group["lr"])
-                        # Update bias
-                        if module.bias.grad is not None:
-                            module.bias.data.add_(natural_grad[:, -1], alpha=-group["lr"])
-                    else:
-                        param.data.add_(natural_grad, alpha=-group["lr"])
-
+                            bias_grad = torch.zeros_like(module.bias.data)
+                        g = torch.cat([g, bias_grad.unsqueeze(1)], 1)
                 elif self.known_modules[module] == "Conv2d":
-                    # For Conv2d: simplified version treating as matrix
-                    g_reshape = v.data.view(v.size(0), -1)
-                    if module.bias is not None and g_reshape.size(1) == m_aa_damp.size(0) - 1:
+                    # For Conv2d: weight is (out_channels, in_channels, kernel_height, kernel_width)
+                    g = g.view(g.size(0), -1)
+                    if module.bias is not None and g.size(1) == m_aa.size(0) - 1:
                         if module.bias.grad is not None:
                             bias_grad = module.bias.grad.data
                         else:
-                            bias_grad = torch.zeros_like(module.bias)
-                        g_reshape = torch.cat([g_reshape, bias_grad.unsqueeze(1)], 1)
+                            bias_grad = torch.zeros_like(module.bias.data)
+                        g = torch.cat([g, bias_grad.unsqueeze(1)], 1)
 
-                    inv_gg = torch.linalg.inv(m_gg_damp)
-                    inv_aa = torch.linalg.inv(m_aa_damp)
-                    natural_grad = torch.linalg.multi_dot([inv_gg, g_reshape, inv_aa])
+                v = self._apply_fisher_preconditioned_grad(
+                    g,
+                    m_aa,
+                    m_gg,
+                    lam=self.damping + weight_decay,
+                )
 
-                    if module.bias is not None and natural_grad.size(1) > v.view(v.size(0), -1).size(1):
-                        param.data.add_(natural_grad[:, :-1].view_as(v), alpha=-group["lr"])
-                        if module.bias.grad is not None:
-                            module.bias.data.add_(natural_grad[:, -1], alpha=-group["lr"])
+                # Split weight and bias updates
+                if self.known_modules[module] == "Linear":
+                    if module.bias is not None and v.size(1) == param.data.size(1) + 1:
+                        weight_update = v[:, :-1]
+                        bias_update = v[:, -1]
                     else:
-                        param.data.add_(natural_grad.view_as(v), alpha=-group["lr"])
+                        weight_update = v
+                        bias_update = None
+                elif self.known_modules[module] == "Conv2d":
+                    if module.bias is not None and v.size(1) == param.data.numel() + 1:
+                        weight_update = v[:, :-1].view_as(param.data)
+                        bias_update = v[:, -1]
+                    else:
+                        weight_update = v.view_as(param.data)
+                        bias_update = None
+
+                # Record the update
+                kfac_update[param] = {
+                    "module": module,
+                    "weight_update": weight_update,
+                    "bias_update": bias_update,
+                    "lr": lr,
+                    "momentum": momentum,
+                    "effective_lr": effective_lr,
+                    "weight_decay": weight_decay,
+                }
+                vg_sum += (v * g * lr * lr).sum().item()
+
+        # Compute scaling factor for KL clipping, i.e., eta_max is fixed as 1.0
+        scaling = torch.min(torch.tensor(1.0), torch.sqrt(self.kl_clip / (vg_sum + 1e-10)))
+        for param, update_info in kfac_update.items():
+            module = update_info["module"]
+            weight_update = update_info["weight_update"]
+            bias_update = update_info["bias_update"]
+            lr = update_info["lr"]
+            effective_lr = update_info["effective_lr"]
+            momentum = update_info["momentum"]
+
+            # Update momentum buffer
+            v = self._get_momentum_buffer(param)
+            v.mul_(momentum).add_(weight_update, alpha=effective_lr * scaling)
+            param.data.add_(v, alpha=-1.0)
+
+            # Update bias if applicable
+            if bias_update is not None and module.bias is not None:
+                v_bias = self._get_momentum_buffer(module.bias)
+                v_bias.mul_(momentum).add_(bias_update, alpha=effective_lr * scaling)
+                module.bias.data.add_(v_bias, alpha=-1.0)
 
     @torch.no_grad()
     def step(self, closure: Any = None) -> torch.Tensor | None:  # noqa: C901
@@ -412,6 +394,10 @@ class KFACOptimizer(optim.Optimizer):
             # Use standard SGD momentum during cold start phase
             self._sgd_momentum_step()
         else:
+            # Clear momentum buffers if transitioning from cold start
+            if self.steps == self.cold_start_steps:
+                self._clear_momentum_buffers()
+
             # Use K-FAC natural gradient step
             self._kfac_step()
 
