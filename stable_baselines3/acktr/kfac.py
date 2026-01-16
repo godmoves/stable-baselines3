@@ -123,7 +123,10 @@ class KFACOptimizer(optim.Optimizer):
             self.gradients[module] = gg
 
     def _update_fisher_stats(self) -> None:
-        """Update Fisher information matrices using stored activations and gradients."""
+        """
+        Update Fisher information matrices using stored activations and gradients.
+        Here we assume the loss is averaged over the batch.
+        """
         for module in self.modules:
             if self.activations[module] is not None and self.gradients[module] is not None:
                 classname = self.known_modules[module]
@@ -143,17 +146,24 @@ class KFACOptimizer(optim.Optimizer):
                 elif classname == "Conv2d":
                     # aa: (batch_size, in_channels, height, width)
                     # aa_unfold: (batch_size, in_channels * kernel_height * kernel_width, num_patches)
-                    aa_unfold = F.unfold(aa, module.kernel_size, padding=module.padding, stride=module.stride)
+                    aa_unfold = F.unfold(aa, module.kernel_size, dilation=module.dilation, padding=module.padding, stride=module.stride)
+                    B = aa_unfold.size(0)  # batch_size
+                    T = aa_unfold.size(2)  # num_patches = out_height * out_width
                     # Reshape to (batch_size * num_patches, in_channels * kernel_height * kernel_width)
                     aa_unfold = aa_unfold.permute(0, 2, 1).contiguous().view(-1, aa_unfold.size(1))
+                    aa_unfold = aa_unfold / T
                     # Add bias term
                     if module.bias is not None:
-                        aa_unfold = torch.cat([aa_unfold, aa_unfold.new_ones(aa_unfold.size(0), 1)], 1)
-                    cov_a = aa_unfold.t() @ aa_unfold / aa_unfold.size(0)
+                        aa_unfold = torch.cat(
+                            [aa_unfold, aa_unfold.new_ones(aa_unfold.size(0), 1) / T],
+                            dim=1,
+                        )
+                    cov_a = aa_unfold.t() @ aa_unfold / B
                     # gg: (batch_size, out_channels, out_height, out_width)
                     # Reshape to (batch_size * out_height * out_width, out_channels)
-                    gg_reshaped = gg.permute(0, 2, 3, 1).contiguous().view(-1, gg.size(1))
-                    cov_g = gg_reshaped.t() @ gg_reshaped / gg_reshaped.size(0)
+                    gg_2d = gg.permute(0, 2, 3, 1).contiguous().view(-1, gg.size(1))
+                    gg_2d = gg_2d * T * B
+                    cov_g = gg_2d.t() @ gg_2d / gg_2d.size(0)
 
                 # Update moving averages
                 if self.m_aa[module] is None:
