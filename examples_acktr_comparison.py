@@ -32,16 +32,19 @@ algorithms = {
     "ACKTR": {
         "class": ACKTR,
         "kwargs": {
-            "learning_rate": 0.01,  # Reduced from 0.25 - too high for LunarLander
-            "n_steps": 20,  # Increased from 20 - larger batch size for stability
+            "learning_rate": 0.25,  # Use default from paper - K-FAC preconditions gradients
+            "n_steps": 20,  # Default from paper
             "gamma": 0.99,
-            "gae_lambda": 0.95,  # Changed from 1.0 - better bias-variance tradeoff
+            "gae_lambda": 1.0,  # ACKTR paper uses 1.0
             "ent_coef": 0.01,
             "vf_coef": 0.5,
+            "vf_fisher_coef": 1.0,  # Value function Fisher coefficient
             "max_grad_norm": 0.5,
-            "kfac_update_freq": 1,  # Update K-FAC less frequently for stability
-            # "kfac_damping": 0.01,  # Increased damping for stability
-            "normalize_advantage": True,  # Enable advantage normalization
+            "kfac_update_freq": 1,  # Update every step
+            "kfac_stat_decay": 0.95,  # Faster decay for better adaptation
+            "kfac_damping": 0.01,  # Default damping
+            "kfac_kl_clip": 0.01,  # KL clipping for trust region
+            "normalize_advantage": False,  # Don't normalize - not in original
         },
     },
     "PPO": {
