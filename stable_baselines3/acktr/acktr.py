@@ -84,6 +84,8 @@ class ACKTR(OnPolicyAlgorithm):
         kfac_damping: float = 1e-2,
         kfac_kl_clip: float = 0.001,
         kfac_stat_decay: float = 0.99,
+        kfac_cold_start_steps: int = 10,
+        kfac_cold_start_lr: float = 0.1,
         use_sde: bool = False,
         sde_sample_freq: int = -1,
         rollout_buffer_class: type[RolloutBuffer] | None = None,
@@ -132,6 +134,8 @@ class ACKTR(OnPolicyAlgorithm):
         self.kfac_damping = kfac_damping
         self.kfac_kl_clip = kfac_kl_clip
         self.kfac_stat_decay = kfac_stat_decay
+        self.kfac_cold_start_steps = kfac_cold_start_steps
+        self.kfac_cold_start_lr = kfac_cold_start_lr
         self.vf_fisher_coef = vf_fisher_coef
 
         # K-FAC optimizer will be set up in _setup_model after policy is created
@@ -160,7 +164,8 @@ class ACKTR(OnPolicyAlgorithm):
             damping=self.kfac_damping,
             update_freq=self.kfac_update_freq,
             weight_decay=0,
-            cold_start_steps=10,
+            cold_start_steps=self.kfac_cold_start_steps,
+            cold_start_lr=self.kfac_cold_start_lr,
             max_grad_norm=self.max_grad_norm,
         )
 

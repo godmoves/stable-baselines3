@@ -242,7 +242,7 @@ class KFACOptimizer(optim.Optimizer):
                 # if group["weight_decay"] != 0:
                 #     # Use decoupled weight decay as in AdamW
                 #     param.data.add_(param.data, alpha=-group["weight_decay"] * group["lr"])
-                param.data.add_(v, alpha=-group["lr"])
+                param.data.add_(v, alpha=-self.cold_start_lr)
 
     def _apply_fisher_preconditioned_grad(
         self,
@@ -407,6 +407,7 @@ class KFACOptimizer(optim.Optimizer):
         else:
             # Clear momentum buffers if transitioning from cold start
             if self.steps == self.cold_start_steps:
+                print("K-FAC Optimizer: Switching from cold start SGD to K-FAC natural gradient.")
                 self._clear_momentum_buffers()
 
             # Use K-FAC natural gradient step

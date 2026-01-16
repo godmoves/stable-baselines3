@@ -32,7 +32,7 @@ algorithms = {
     "ACKTR": {
         "class": ACKTR,
         "kwargs": {
-            "learning_rate": 0.25,  # Use default from paper - K-FAC preconditions gradients
+            "learning_rate": 0.1,  # Use default from paper - K-FAC preconditions gradients
             "n_steps": 20,  # Default from paper
             "gamma": 0.99,
             "gae_lambda": 1.0,  # ACKTR paper uses 1.0
@@ -43,34 +43,36 @@ algorithms = {
             "kfac_update_freq": 1,  # Update every step
             "kfac_stat_decay": 0.95,  # Faster decay for better adaptation
             "kfac_damping": 0.01,  # Default damping
-            "kfac_kl_clip": 0.01,  # KL clipping for trust region
+            "kfac_kl_clip": 0.001,  # KL clipping for trust region
+            "kfac_cold_start_steps": 1000,  # Cold start steps for K-FAC
+            "kfac_cold_start_lr": 0.001,  # Learning rate during cold start
             "normalize_advantage": False,  # Don't normalize - not in original
         },
     },
-    "PPO": {
-        "class": PPO,
-        "kwargs": {
-            "learning_rate": 3e-4,
-            "n_steps": 2048,
-            "batch_size": 64,
-            "n_epochs": 10,
-            "gamma": 0.99,
-            "gae_lambda": 0.95,
-            "clip_range": 0.2,
-            "ent_coef": 0.01,
-        },
-    },
-    "A2C": {
-        "class": A2C,
-        "kwargs": {
-            "learning_rate": 7e-4,
-            "n_steps": 5,
-            "gamma": 0.99,
-            "gae_lambda": 1.0,
-            "ent_coef": 0.01,
-            "vf_coef": 0.5,
-        },
-    },
+    # "PPO": {
+    #     "class": PPO,
+    #     "kwargs": {
+    #         "learning_rate": 3e-4,
+    #         "n_steps": 2048,
+    #         "batch_size": 64,
+    #         "n_epochs": 10,
+    #         "gamma": 0.99,
+    #         "gae_lambda": 0.95,
+    #         "clip_range": 0.2,
+    #         "ent_coef": 0.01,
+    #     },
+    # },
+    # "A2C": {
+    #     "class": A2C,
+    #     "kwargs": {
+    #         "learning_rate": 7e-4,
+    #         "n_steps": 5,
+    #         "gamma": 0.99,
+    #         "gae_lambda": 1.0,
+    #         "ent_coef": 0.01,
+    #         "vf_coef": 0.5,
+    #     },
+    # },
 }
 
 # Train and evaluate each algorithm
