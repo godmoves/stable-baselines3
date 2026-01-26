@@ -210,27 +210,36 @@ class ACKTR(OnPolicyAlgorithm):
 
             loss = policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss
 
-            # Fisher loss for K-FAC
-            policy_fisher_loss = log_prob.mean()
-            values_sample = (values + th.randn_like(values)).detach()
-            value_fisher_loss = -((values - values_sample) ** 2).mean()
-            fisher_loss = policy_fisher_loss + self.vf_fisher_coef * value_fisher_loss
+            # Only compute Fisher statistics when they will be consumed by the optimizer.
+            # KFACOptimizer saves activations/gradients only when (steps % update_freq == 0)
+            # and KFACOptimizer.step() consumes them at the beginning of the step.
+            do_fisher_update = self.policy.optimizer.steps % self.policy.optimizer.update_freq == 0
+
+            fisher_loss = None
+            if do_fisher_update:
+                # Fisher loss for K-FAC
+                policy_fisher_loss = log_prob.mean()
+                values_sample = (values + th.randn_like(values)).detach()
+                value_fisher_loss = -((values - values_sample) ** 2).mean()
+                fisher_loss = policy_fisher_loss + self.vf_fisher_coef * value_fisher_loss
 
             # Optimization step
             self.policy.optimizer.zero_grad()
-            loss.backward(retain_graph=True)
+            loss.backward(retain_graph=do_fisher_update)
 
-            # Use autograd.grad to run a backward pass that triggers hooks for Fisher
-            # statistics without modifying parameter .grad (used for the actual update).
-            self.policy.optimizer.acc_stats = True
-            th.autograd.grad(
-                fisher_loss,
-                list(self.policy.parameters()),
-                retain_graph=False,
-                create_graph=False,
-                allow_unused=True,
-            )
-            self.policy.optimizer.acc_stats = False
+            if do_fisher_update:
+                assert fisher_loss is not None
+                # Use autograd.grad to run a backward pass that triggers hooks for Fisher
+                # statistics without modifying parameter .grad (used for the actual update).
+                self.policy.optimizer.acc_stats = True
+                th.autograd.grad(
+                    fisher_loss,
+                    list(self.policy.parameters()),
+                    retain_graph=False,
+                    create_graph=False,
+                    allow_unused=True,
+                )
+                self.policy.optimizer.acc_stats = False
 
             # Step the K-FAC optimizer
             self.policy.optimizer.step()

@@ -6,6 +6,7 @@ a more challenging environment than CartPole. It trains each algorithm
 and plots their learning curves for comparison.
 """
 
+import argparse
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -14,12 +15,25 @@ from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.evaluation import evaluate_policy
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--env-id", type=str, default="LunarLander-v3")
+    parser.add_argument("--n-envs", type=int, default=4)
+    parser.add_argument("--total-timesteps", type=int, default=200_000)
+    parser.add_argument("--eval-freq", type=int, default=5_000)
+    parser.add_argument("--n-eval-episodes", type=int, default=10)
+    parser.add_argument("--seed", type=int, default=0)
+    return parser.parse_args()
+
+
+args = parse_args()
+
 # Environment settings
-ENV_ID = "LunarLander-v3"
-N_ENVS = 4
-TOTAL_TIMESTEPS = 200_000
-EVAL_FREQ = 5_000
-N_EVAL_EPISODES = 10
+ENV_ID = args.env_id
+N_ENVS = args.n_envs
+TOTAL_TIMESTEPS = args.total_timesteps
+EVAL_FREQ = args.eval_freq
+N_EVAL_EPISODES = args.n_eval_episodes
 
 print(f"Comparing ACKTR, PPO, and A2C on {ENV_ID}")
 print(f"Training for {TOTAL_TIMESTEPS} timesteps\n")
@@ -49,30 +63,30 @@ algorithms = {
             "normalize_advantage": False,  # Don't normalize - not in original
         },
     },
-    # "PPO": {
-    #     "class": PPO,
-    #     "kwargs": {
-    #         "learning_rate": 3e-4,
-    #         "n_steps": 2048,
-    #         "batch_size": 64,
-    #         "n_epochs": 10,
-    #         "gamma": 0.99,
-    #         "gae_lambda": 0.95,
-    #         "clip_range": 0.2,
-    #         "ent_coef": 0.01,
-    #     },
-    # },
-    # "A2C": {
-    #     "class": A2C,
-    #     "kwargs": {
-    #         "learning_rate": 7e-4,
-    #         "n_steps": 5,
-    #         "gamma": 0.99,
-    #         "gae_lambda": 1.0,
-    #         "ent_coef": 0.01,
-    #         "vf_coef": 0.5,
-    #     },
-    # },
+    "PPO": {
+        "class": PPO,
+        "kwargs": {
+            "learning_rate": 3e-4,
+            "n_steps": 2048,
+            "batch_size": 64,
+            "n_epochs": 10,
+            "gamma": 0.99,
+            "gae_lambda": 0.95,
+            "clip_range": 0.2,
+            "ent_coef": 0.01,
+        },
+    },
+    "A2C": {
+        "class": A2C,
+        "kwargs": {
+            "learning_rate": 7e-4,
+            "n_steps": 5,
+            "gamma": 0.99,
+            "gae_lambda": 1.0,
+            "ent_coef": 0.01,
+            "vf_coef": 0.5,
+        },
+    },
 }
 
 # Train and evaluate each algorithm
@@ -82,8 +96,8 @@ for algo_name, algo_config in algorithms.items():
     print(f"{'='*50}")
 
     # Create vectorized environment
-    env = make_vec_env(ENV_ID, n_envs=N_ENVS)
-    eval_env = make_vec_env(ENV_ID, n_envs=1)
+    env = make_vec_env(ENV_ID, n_envs=N_ENVS, seed=args.seed)
+    eval_env = make_vec_env(ENV_ID, n_envs=1, seed=args.seed + 1)
 
     # Create callback for evaluation during training
     eval_callback = EvalCallback(
@@ -98,7 +112,7 @@ for algo_name, algo_config in algorithms.items():
 
     # Create and train model
     model = algo_config["class"](
-        "MlpPolicy", env, verbose=0, **algo_config["kwargs"]
+        "MlpPolicy", env, verbose=0, seed=args.seed, **algo_config["kwargs"]
     )
 
     model.learn(total_timesteps=TOTAL_TIMESTEPS, callback=eval_callback)
