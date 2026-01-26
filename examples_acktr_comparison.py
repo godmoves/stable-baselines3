@@ -1,0 +1,181 @@
+"""
+Algorithm Comparison: ACKTR vs PPO vs A2C
+
+This script compares ACKTR, PPO, and A2C algorithms on LunarLander-v2,
+a more challenging environment than CartPole. It trains each algorithm
+and plots their learning curves for comparison.
+"""
+
+import argparse
+import matplotlib.pyplot as plt
+import numpy as np
+
+from stable_baselines3 import A2C, ACKTR, PPO
+from stable_baselines3.common.callbacks import EvalCallback
+from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.evaluation import evaluate_policy
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--env-id", type=str, default="LunarLander-v3")
+    parser.add_argument("--n-envs", type=int, default=4)
+    parser.add_argument("--total-timesteps", type=int, default=200_000)
+    parser.add_argument("--eval-freq", type=int, default=5_000)
+    parser.add_argument("--n-eval-episodes", type=int, default=10)
+    parser.add_argument("--seed", type=int, default=0)
+    return parser.parse_args()
+
+
+args = parse_args()
+
+# Environment settings
+ENV_ID = args.env_id
+N_ENVS = args.n_envs
+TOTAL_TIMESTEPS = args.total_timesteps
+EVAL_FREQ = args.eval_freq
+N_EVAL_EPISODES = args.n_eval_episodes
+
+print(f"Comparing ACKTR, PPO, and A2C on {ENV_ID}")
+print(f"Training for {TOTAL_TIMESTEPS} timesteps\n")
+
+# Results storage
+results = {}
+
+# Algorithm configurations
+algorithms = {
+    "ACKTR": {
+        "class": ACKTR,
+        "kwargs": {
+            "learning_rate": 0.1,  # Use default from paper - K-FAC preconditions gradients
+            "n_steps": 20,  # Default from paper
+            "gamma": 0.99,
+            "gae_lambda": 1.0,  # ACKTR paper uses 1.0
+            "ent_coef": 0.01,
+            "vf_coef": 0.5,
+            "vf_fisher_coef": 1.0,  # Value function Fisher coefficient
+            "max_grad_norm": 0.5,
+            "kfac_update_freq": 1,  # Update every step
+            "kfac_stat_decay": 0.95,  # Faster decay for better adaptation
+            "kfac_damping": 0.01,  # Default damping
+            "kfac_kl_clip": 0.001,  # KL clipping for trust region
+            "kfac_cold_start_steps": 1000,  # Cold start steps for K-FAC
+            "kfac_cold_start_lr": 0.001,  # Learning rate during cold start
+            "normalize_advantage": False,  # Don't normalize - not in original
+        },
+    },
+    "PPO": {
+        "class": PPO,
+        "kwargs": {
+            "learning_rate": 3e-4,
+            "n_steps": 2048,
+            "batch_size": 64,
+            "n_epochs": 10,
+            "gamma": 0.99,
+            "gae_lambda": 0.95,
+            "clip_range": 0.2,
+            "ent_coef": 0.01,
+        },
+    },
+    "A2C": {
+        "class": A2C,
+        "kwargs": {
+            "learning_rate": 7e-4,
+            "n_steps": 5,
+            "gamma": 0.99,
+            "gae_lambda": 1.0,
+            "ent_coef": 0.01,
+            "vf_coef": 0.5,
+        },
+    },
+}
+
+# Train and evaluate each algorithm
+for algo_name, algo_config in algorithms.items():
+    print(f"\n{'='*50}")
+    print(f"Training {algo_name}")
+    print(f"{'='*50}")
+
+    # Create vectorized environment
+    env = make_vec_env(ENV_ID, n_envs=N_ENVS, seed=args.seed)
+    eval_env = make_vec_env(ENV_ID, n_envs=1, seed=args.seed + 1)
+
+    # Create callback for evaluation during training
+    eval_callback = EvalCallback(
+        eval_env,
+        best_model_save_path=f"./logs/{algo_name}/",
+        log_path=f"./logs/{algo_name}/",
+        eval_freq=EVAL_FREQ // N_ENVS,
+        n_eval_episodes=N_EVAL_EPISODES,
+        deterministic=True,
+        render=False,
+    )
+
+    # Create and train model
+    model = algo_config["class"](
+        "MlpPolicy", env, verbose=0, seed=args.seed, **algo_config["kwargs"]
+    )
+
+    model.learn(total_timesteps=TOTAL_TIMESTEPS, callback=eval_callback)
+
+    # Final evaluation
+    print(f"\nFinal evaluation of {algo_name}...")
+    mean_reward, std_reward = evaluate_policy(
+        model, eval_env, n_eval_episodes=N_EVAL_EPISODES, deterministic=True
+    )
+    print(f"{algo_name} - Mean reward: {mean_reward:.2f} +/- {std_reward:.2f}")
+
+    # Store results
+    results[algo_name] = {
+        "mean_reward": mean_reward,
+        "std_reward": std_reward,
+        "evaluations": eval_callback.evaluations_results,
+        "timesteps": eval_callback.evaluations_timesteps,
+    }
+
+    # Clean up
+    env.close()
+    eval_env.close()
+
+# Plot comparison
+print("\n" + "=" * 50)
+print("Generating comparison plot...")
+print("=" * 50)
+
+plt.figure(figsize=(12, 6))
+
+for algo_name, result in results.items():
+    timesteps = np.array(result["timesteps"])
+    evaluations = np.array(result["evaluations"])
+    mean_rewards = evaluations.mean(axis=1)
+    std_rewards = evaluations.std(axis=1)
+
+    plt.plot(timesteps, mean_rewards, label=algo_name, linewidth=2)
+    plt.fill_between(
+        timesteps,
+        mean_rewards - std_rewards,
+        mean_rewards + std_rewards,
+        alpha=0.2,
+    )
+
+plt.xlabel("Timesteps", fontsize=12)
+plt.ylabel("Mean Reward", fontsize=12)
+plt.title(f"Algorithm Comparison on {ENV_ID}", fontsize=14, fontweight="bold")
+plt.legend(loc="best", fontsize=11)
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+
+# Save the plot
+plot_filename = "algorithm_comparison.png"
+plt.savefig(plot_filename, dpi=150, bbox_inches="tight")
+print(f"\nPlot saved as '{plot_filename}'")
+
+# Print final summary
+print("\n" + "=" * 50)
+print("FINAL RESULTS SUMMARY")
+print("=" * 50)
+for algo_name, result in results.items():
+    print(
+        f"{algo_name:10s}: {result['mean_reward']:7.2f} +/- {result['std_reward']:5.2f}"
+    )
+
+print("\nComparison complete!")

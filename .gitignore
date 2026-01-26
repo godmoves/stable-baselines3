@@ -48,3 +48,8 @@ src
 *.prof
 
 MUJOCO_LOG.TXT
+
+# Generated plots and models from examples
+algorithm_comparison.png
+acktr_*.zip
+test_*.py
